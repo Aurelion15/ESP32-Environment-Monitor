@@ -1,0 +1,1743 @@
+/*
+ * ============================================================
+ *                 ESP32 ENVIRONMENT MONITOR
+ * ============================================================
+ *
+ * Author      : Aaron Panisales
+ * Copyright   : © 2026 Aaron Panisales
+ * Project     : ESP32 Environment Monitor
+ * Language    : C++ (Arduino C++)
+ * Platform    : ESP32 / Arduino IDE
+ *
+ * ------------------------------------------------------------
+ * Copyright © 2026 Aaron Panisales. All rights reserved.
+ *
+ * This source code is owned by Aaron Panisales.
+ * Unauthorized copying, modification, distribution, or
+ * reproduction of this code, in whole or in part, is prohibited
+ * without permission from the copyright owner.
+ * ============================================================
+ */
+
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <DHT.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <EEPROM.h>
+#include <ESPmDNS.h>
+#include <WiFiClient.h>
+#include <time.h>
+
+// =====================================================
+// PIN DEFINITIONS
+// =====================================================
+
+#define DHT_PIN 4
+#define DHT_TYPE DHT11
+
+#define BUZZER_PIN 25
+
+#define BUTTON1_PIN 26      // 4-pin button 1
+#define BUTTON2_PIN 27      // 4-pin button 2
+
+#define OLED_SDA 22
+#define OLED_SCL 21
+
+#define LED_BUILTIN 2
+
+// =====================================================
+// OLED CONFIGURATION
+// =====================================================
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+Adafruit_SSD1306 display(
+  SCREEN_WIDTH,
+  SCREEN_HEIGHT,
+  &Wire,
+  -1
+);
+
+// =====================================================
+// DHT SENSOR
+// =====================================================
+
+DHT dht(DHT_PIN, DHT_TYPE);
+
+// =====================================================
+// WEB SERVER
+// =====================================================
+
+const char* ssid = "ESP32_Env_Monitor";
+const char* password = "12345678";
+WebServer server(80);
+
+// =====================================================
+// EEPROM SETTINGS
+// =====================================================
+
+#define EEPROM_SIZE 512
+
+struct Settings {
+  float tempLimit;
+  float humidityLimit;
+  bool buzzerEnabled;
+  int melodyType;
+  int pageInterval;
+  bool celsius;
+  bool autoPage;
+  bool darkMode;
+  int brightness;
+  bool showSeconds;
+} settings;
+
+// =====================================================
+// SYSTEM VARIABLES
+// =====================================================
+
+float TEMP_LIMIT = 30.0;
+float HUMIDITY_LIMIT = 80.0;
+bool buzzerEnabled = true;
+int melodyType = 0;
+bool celsius = true;
+bool autoPage = true;
+bool darkMode = true;
+bool showSeconds = true;
+
+float temperature = 0;
+float humidity = 0;
+
+float minTemp = 100;
+float maxTemp = -100;
+float minHumidity = 100;
+float maxHumidity = 0;
+
+float tempHistory[180];
+float humidityHistory[180];
+int historyIndex = 0;
+
+float tempAverage = 0;
+float humidityAverage = 0;
+float tempTrend = 0;
+float humidityTrend = 0;
+
+// =====================================================
+// BUTTON STATES
+// =====================================================
+
+bool button1State = false;
+bool button2State = false;
+bool button1Pressed = false;
+bool button2Pressed = false;
+unsigned long button1PressTime = 0;
+unsigned long button2PressTime = 0;
+unsigned long lastDebounce1 = 0;
+unsigned long lastDebounce2 = 0;
+const unsigned long DEBOUNCE_DELAY = 50;
+const unsigned long LONG_PRESS_DELAY = 1500;
+
+// =====================================================
+// ALARM STATE
+// =====================================================
+
+bool alarmState = false;
+unsigned long lastAlarmBlink = 0;
+unsigned long lastMelodyPlay = 0;
+bool melodyPlaying = false;
+int melodyNoteIndex = 0;
+unsigned long melodyStartTime = 0;
+int alarmCount = 0;
+unsigned long alarmStartTime = 0;
+unsigned long alarmTotalTime = 0;
+
+// =====================================================
+// PLEASANT MELODIES
+// =====================================================
+
+const int melody0[] = {523, 587, 659, 784, 880, 784, 659, 523};
+const int duration0[] = {200, 200, 200, 300, 300, 200, 200, 400};
+const int melody0Len = 8;
+
+const int melody1[] = {784, 880, 988, 784, 880, 988, 1175, 1047, 1175, 1319};
+const int duration1[] = {150, 150, 250, 150, 150, 250, 300, 200, 200, 400};
+const int melody1Len = 10;
+
+const int melody2[] = {392, 523, 659, 784, 659, 523, 392, 523, 659, 784, 880, 784};
+const int duration2[] = {300, 300, 300, 400, 300, 300, 300, 300, 300, 400, 300, 500};
+const int melody2Len = 12;
+
+const int melody3[] = {988, 1175, 1319, 1568, 1319, 1175, 988, 1175, 1319, 1568};
+const int duration3[] = {150, 150, 200, 300, 200, 150, 150, 150, 200, 400};
+const int melody3Len = 10;
+
+const int melody4[] = {659, 587, 523, 659, 587, 523, 784, 659, 587, 523, 659, 784};
+const int duration4[] = {100, 100, 100, 100, 100, 100, 150, 150, 100, 100, 150, 300};
+const int melody4Len = 12;
+
+const int melody5[] = {262, 294, 330, 349, 392, 440, 494, 523, 494, 440, 392, 349};
+const int duration5[] = {300, 300, 300, 300, 300, 300, 300, 400, 300, 300, 300, 500};
+const int melody5Len = 12;
+
+const int melody6[] = {392, 523, 659, 784, 659, 523, 392, 330, 392, 523, 659, 784};
+const int duration6[] = {250, 250, 250, 350, 250, 250, 250, 250, 250, 250, 250, 500};
+const int melody6Len = 12;
+
+const int* currentMelody = melody0;
+const int* currentDuration = duration0;
+int currentMelodyLen = melody0Len;
+
+// =====================================================
+// DISPLAY PAGES
+// =====================================================
+
+int currentPage = 0;
+const int TOTAL_PAGES = 7;
+unsigned long lastPageChange = 0;
+const unsigned long AUTO_PAGE_INTERVAL = 8000;
+
+// =====================================================
+// TIMERS
+// =====================================================
+
+unsigned long lastReading = 0;
+unsigned long lastWebUpdate = 0;
+unsigned long lastStatsUpdate = 0;
+unsigned long lastDisplayUpdate = 0;
+unsigned long lastTrendUpdate = 0;
+unsigned long lastClockUpdate = 0;
+
+const unsigned long SENSOR_INTERVAL = 2000;
+const unsigned long WEB_INTERVAL = 1000;
+const unsigned long STATS_INTERVAL = 10000;
+const unsigned long DISPLAY_INTERVAL = 100;
+const unsigned long TREND_INTERVAL = 60000;
+const unsigned long CLOCK_INTERVAL = 1000;
+
+// =====================================================
+// SENSOR STATUS
+// =====================================================
+
+int sensorErrors = 0;
+bool sensorConnected = false;
+unsigned long sensorErrorStart = 0;
+
+// =====================================================
+// ANIMATION
+// =====================================================
+
+int animationFrame = 0;
+bool animationDirection = true;
+int loadingBarPosition = 0;
+int waveOffset = 0;
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup() {
+  
+  Serial.begin(115200);
+  Serial.println("╔════════════════════════════════════════╗");
+  Serial.println("║     ESP32 ENVIRONMENT MONITOR v8.0     ║");
+  Serial.println("║            ULTIMATE EDITION            ║");
+  Serial.println("╚════════════════════════════════════════╝");
+  
+  EEPROM.begin(EEPROM_SIZE);
+  loadSettings();
+  
+  dht.begin();
+  delay(1000);
+  
+  pinMode(BUZZER_PIN, OUTPUT);
+  noTone(BUZZER_PIN);
+  
+  pinMode(BUTTON1_PIN, INPUT_PULLUP);
+  pinMode(BUTTON2_PIN, INPUT_PULLUP);
+  
+  Wire.begin(OLED_SDA, OLED_SCL);
+  
+  Serial.println("[OLED] Initializing display...");
+  
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("[ERROR] OLED not found at address 0x3C!");
+    Serial.println("[ERROR] Trying address 0x3D...");
+    
+    if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3D)) {
+      Serial.println("[ERROR] OLED not found at 0x3D either!");
+      Serial.println("[ERROR] Please check wiring!");
+      
+      while (true) {
+        delay(1000);
+        Serial.print(".");
+      }
+    }
+  }
+  
+  Serial.println("[OLED] Display initialized successfully!");
+  
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextWrap(false);
+  display.display();
+  
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, LOW);
+  
+  selectMelody(melodyType);
+  playStartupMelody();
+  showStartupScreen();
+  
+  WiFi.softAP(ssid, password);
+  Serial.println("[WIFI] Access Point Started");
+  Serial.print("[WIFI] IP Address: ");
+  Serial.println(WiFi.softAPIP());
+  
+  if (MDNS.begin("esp32env")) {
+    Serial.println("[MDNS] Started: esp32env.local");
+  }
+  
+  setupWebServer();
+  
+  for (int i = 0; i < 180; i++) {
+    tempHistory[i] = 0;
+    humidityHistory[i] = 0;
+  }
+  
+  readSensor();
+  playReadyMelody();
+  
+  Serial.println("[SYSTEM] Ready!");
+  Serial.println("╔════════════════════════════════════════╗");
+  Serial.println("║  Connect to WiFi: ESP32_Env_Monitor  ║");
+  Serial.println("║  Password: 12345678                  ║");
+  Serial.println("║  Web: http://192.168.4.1             ║");
+  Serial.println("╚════════════════════════════════════════╝");
+  
+  delay(1000);
+}
+
+// =====================================================
+// MAIN LOOP
+// =====================================================
+
+void loop() {
+  
+  unsigned long currentMillis = millis();
+  
+  if (currentMillis - lastReading >= SENSOR_INTERVAL) {
+    lastReading = currentMillis;
+    readSensor();
+    updateHistory();
+  }
+  
+  handleButtons();
+  
+  if (autoPage && (currentMillis - lastPageChange >= AUTO_PAGE_INTERVAL)) {
+    lastPageChange = currentMillis;
+    if (!button1Pressed && !button2Pressed) {
+      currentPage = (currentPage + 1) % TOTAL_PAGES;
+    }
+  }
+  
+  if (currentMillis - lastStatsUpdate >= STATS_INTERVAL) {
+    lastStatsUpdate = currentMillis;
+    updateStatistics();
+  }
+  
+  if (currentMillis - lastTrendUpdate >= TREND_INTERVAL) {
+    lastTrendUpdate = currentMillis;
+    updateTrend();
+  }
+  
+  if (currentMillis - lastWebUpdate >= WEB_INTERVAL) {
+    lastWebUpdate = currentMillis;
+    server.handleClient();
+  }
+  
+  if (currentMillis - lastDisplayUpdate >= DISPLAY_INTERVAL) {
+    lastDisplayUpdate = currentMillis;
+    updateAnimation();
+    updateDisplay();
+  }
+  
+  if (currentMillis - lastClockUpdate >= CLOCK_INTERVAL) {
+    lastClockUpdate = currentMillis;
+  }
+  
+  checkAlarm();
+  
+  if (melodyPlaying) {
+    playMelodyNonBlocking();
+  }
+  
+  delay(5);
+}
+
+// =====================================================
+// ANIMATION UPDATE
+// =====================================================
+
+void updateAnimation() {
+  if (loadingBarPosition >= 124) {
+    animationDirection = false;
+  } else if (loadingBarPosition <= 0) {
+    animationDirection = true;
+  }
+  
+  if (animationDirection) {
+    loadingBarPosition += 2;
+  } else {
+    loadingBarPosition -= 2;
+  }
+  
+  waveOffset = (waveOffset + 1) % 128;
+  animationFrame = (animationFrame + 1) % 100;
+}
+
+// =====================================================
+// MELODY FUNCTIONS
+// =====================================================
+
+void selectMelody(int type) {
+  melodyType = type;
+  
+  switch (type) {
+    case 0:
+      currentMelody = melody0;
+      currentDuration = duration0;
+      currentMelodyLen = melody0Len;
+      break;
+    case 1:
+      currentMelody = melody1;
+      currentDuration = duration1;
+      currentMelodyLen = melody1Len;
+      break;
+    case 2:
+      currentMelody = melody2;
+      currentDuration = duration2;
+      currentMelodyLen = melody2Len;
+      break;
+    case 3:
+      currentMelody = melody3;
+      currentDuration = duration3;
+      currentMelodyLen = melody3Len;
+      break;
+    case 4:
+      currentMelody = melody4;
+      currentDuration = duration4;
+      currentMelodyLen = melody4Len;
+      break;
+    case 5:
+      currentMelody = melody5;
+      currentDuration = duration5;
+      currentMelodyLen = melody5Len;
+      break;
+    case 6:
+      currentMelody = melody6;
+      currentDuration = duration6;
+      currentMelodyLen = melody6Len;
+      break;
+    default:
+      currentMelody = melody0;
+      currentDuration = duration0;
+      currentMelodyLen = melody0Len;
+      break;
+  }
+}
+
+void playMelodyNonBlocking() {
+  unsigned long currentMillis = millis();
+  
+  if (melodyNoteIndex < currentMelodyLen) {
+    if (currentMillis - melodyStartTime >= currentDuration[melodyNoteIndex]) {
+      noTone(BUZZER_PIN);
+      melodyNoteIndex++;
+      
+      if (melodyNoteIndex < currentMelodyLen) {
+        tone(BUZZER_PIN, currentMelody[melodyNoteIndex], currentDuration[melodyNoteIndex]);
+        melodyStartTime = currentMillis;
+      } else {
+        melodyPlaying = false;
+        noTone(BUZZER_PIN);
+      }
+    }
+  }
+}
+
+void playFullMelody(const int* melody, const int* durations, int length) {
+  if (!buzzerEnabled) return;
+  
+  for (int i = 0; i < length; i++) {
+    tone(BUZZER_PIN, melody[i], durations[i]);
+    delay(durations[i] + 30);
+    noTone(BUZZER_PIN);
+  }
+}
+
+void startAlarmMelody() {
+  if (!buzzerEnabled || melodyPlaying) return;
+  
+  melodyNoteIndex = 0;
+  melodyStartTime = millis();
+  melodyPlaying = true;
+  tone(BUZZER_PIN, currentMelody[0], currentDuration[0]);
+}
+
+void playStartupMelody() {
+  if (!buzzerEnabled) return;
+  playFullMelody(melody0, duration0, 4);
+}
+
+void playReadyMelody() {
+  if (!buzzerEnabled) return;
+  tone(BUZZER_PIN, 1047, 100);
+  delay(50);
+  noTone(BUZZER_PIN);
+}
+
+void playClickTone() {
+  if (!buzzerEnabled) return;
+  tone(BUZZER_PIN, 1200, 25);
+  delay(30);
+  noTone(BUZZER_PIN);
+}
+
+void playBuzzerOnTone() {
+  if (!buzzerEnabled) return;
+  tone(BUZZER_PIN, 784, 100);
+  delay(120);
+  tone(BUZZER_PIN, 1047, 150);
+  delay(50);
+  noTone(BUZZER_PIN);
+}
+
+void playBuzzerOffTone() {
+  if (!buzzerEnabled) return;
+  tone(BUZZER_PIN, 1047, 100);
+  delay(120);
+  tone(BUZZER_PIN, 784, 150);
+  delay(50);
+  noTone(BUZZER_PIN);
+}
+
+// =====================================================
+// SENSOR FUNCTIONS
+// =====================================================
+
+void readSensor() {
+  float newHumidity = dht.readHumidity();
+  float newTemperature = dht.readTemperature();
+  
+  if (isnan(newHumidity) || isnan(newTemperature)) {
+    sensorErrors++;
+    if (sensorErrors > 5) {
+      sensorConnected = false;
+      sensorErrorStart = millis();
+    }
+    return;
+  }
+  
+  sensorErrors = 0;
+  sensorConnected = true;
+  
+  if (temperature == 0 && humidity == 0) {
+    temperature = newTemperature;
+    humidity = newHumidity;
+  } else {
+    temperature = (newTemperature * 0.7) + (temperature * 0.3);
+    humidity = (newHumidity * 0.7) + (humidity * 0.3);
+  }
+  
+  if (temperature < minTemp) minTemp = temperature;
+  if (temperature > maxTemp) maxTemp = temperature;
+  if (humidity < minHumidity) minHumidity = humidity;
+  if (humidity > maxHumidity) maxHumidity = humidity;
+  
+  static bool prevAlarm = false;
+  bool currentAlarm = (temperature >= TEMP_LIMIT || humidity >= HUMIDITY_LIMIT);
+  
+  if (currentAlarm && !prevAlarm && buzzerEnabled) {
+    startAlarmMelody();
+    alarmCount++;
+    alarmStartTime = millis();
+  }
+  
+  prevAlarm = currentAlarm;
+  
+  static float lastTemp = -999;
+  static float lastHum = -999;
+  
+  if (abs(temperature - lastTemp) > 0.1 || abs(humidity - lastHum) > 0.5) {
+    lastTemp = temperature;
+    lastHum = humidity;
+    printSerialData();
+  }
+}
+
+void updateHistory() {
+  tempHistory[historyIndex] = temperature;
+  humidityHistory[historyIndex] = humidity;
+  historyIndex = (historyIndex + 1) % 180;
+}
+
+void updateStatistics() {
+  float tempSum = 0;
+  float humidSum = 0;
+  int count = 0;
+  
+  for (int i = 0; i < 180; i++) {
+    if (tempHistory[i] > 0) {
+      tempSum += tempHistory[i];
+      humidSum += humidityHistory[i];
+      count++;
+    }
+  }
+  
+  if (count > 0) {
+    tempAverage = tempSum / count;
+    humidityAverage = humidSum / count;
+  }
+}
+
+void updateTrend() {
+  if (historyIndex >= 10) {
+    float recentTemp = 0;
+    float olderTemp = 0;
+    int recentCount = 0;
+    int olderCount = 0;
+    
+    for (int i = 0; i < 10; i++) {
+      int idx = (historyIndex - 1 - i + 180) % 180;
+      if (tempHistory[idx] > 0) {
+        recentTemp += tempHistory[idx];
+        recentCount++;
+      }
+    }
+    
+    for (int i = 10; i < 20; i++) {
+      int idx = (historyIndex - 1 - i + 180) % 180;
+      if (tempHistory[idx] > 0) {
+        olderTemp += tempHistory[idx];
+        olderCount++;
+      }
+    }
+    
+    if (recentCount > 0 && olderCount > 0) {
+      tempTrend = (recentTemp / recentCount) - (olderTemp / olderCount);
+    }
+  }
+}
+
+// =====================================================
+// BUTTON HANDLING
+// =====================================================
+
+void handleButtons() {
+  bool raw1 = !digitalRead(BUTTON1_PIN);
+  bool raw2 = !digitalRead(BUTTON2_PIN);
+  
+  if (raw1 != button1State) {
+    lastDebounce1 = millis();
+  }
+  
+  if ((millis() - lastDebounce1) > DEBOUNCE_DELAY) {
+    if (raw1 && !button1Pressed) {
+      button1Pressed = true;
+      button1PressTime = millis();
+      playClickTone();
+      
+      currentPage = (currentPage - 1 + TOTAL_PAGES) % TOTAL_PAGES;
+      lastPageChange = millis();
+      
+      Serial.println("[BUTTON] Button 1: Page " + String(currentPage + 1));
+      
+    } else if (!raw1 && button1Pressed) {
+      unsigned long pressDuration = millis() - button1PressTime;
+      
+      if (pressDuration >= LONG_PRESS_DELAY) {
+        buzzerEnabled = !buzzerEnabled;
+        settings.buzzerEnabled = buzzerEnabled;
+        saveSettings();
+        
+        if (buzzerEnabled) {
+          playBuzzerOnTone();
+        } else {
+          playBuzzerOffTone();
+        }
+        
+        Serial.print("[BUTTON] Buzzer: ");
+        Serial.println(buzzerEnabled ? "ON" : "OFF");
+      }
+      
+      button1Pressed = false;
+    }
+  }
+  
+  if (raw2 != button2State) {
+    lastDebounce2 = millis();
+  }
+  
+  if ((millis() - lastDebounce2) > DEBOUNCE_DELAY) {
+    if (raw2 && !button2Pressed) {
+      button2Pressed = true;
+      playClickTone();
+      
+      currentPage = (currentPage + 1) % TOTAL_PAGES;
+      lastPageChange = millis();
+      
+      Serial.println("[BUTTON] Button 2: Page " + String(currentPage + 1));
+      
+    } else if (!raw2 && button2Pressed) {
+      unsigned long pressDuration = millis() - button2PressTime;
+      
+      if (pressDuration >= LONG_PRESS_DELAY) {
+        autoPage = !autoPage;
+        settings.autoPage = autoPage;
+        saveSettings();
+        
+        Serial.print("[BUTTON] Auto Page: ");
+        Serial.println(autoPage ? "ON" : "OFF");
+      }
+      
+      button2Pressed = false;
+    }
+  }
+  
+  button1State = raw1;
+  button2State = raw2;
+}
+
+// =====================================================
+// DISPLAY FUNCTIONS
+// =====================================================
+
+void updateDisplay() {
+  if (!sensorConnected) {
+    showErrorScreen();
+    return;
+  }
+  
+  switch (currentPage) {
+    case 0: showMainPage(); break;
+    case 1: showGraphPage(); break;
+    case 2: showStatisticsPage(); break;
+    case 3: showHistoryPage(); break;
+    case 4: showTrendPage(); break;
+    case 5: showSystemPage(); break;
+    case 6: showClockPage(); break;
+  }
+}
+
+// =====================================================
+// PAGE 1: MAIN DISPLAY
+// =====================================================
+
+void showMainPage() {
+  display.clearDisplay();
+  
+  // Header with gradient effect
+  display.drawRect(0, 0, 128, 10, SSD1306_WHITE);
+  display.fillRect(1, 1, 126, 8, SSD1306_WHITE);
+  display.setTextColor(SSD1306_BLACK);
+  display.setTextSize(1);
+  display.setCursor(2, 2);
+  
+  if (alarmState) {
+    display.print("! ALARM! ");
+    display.print(alarmCount);
+  } else {
+    display.print("ENV MONITOR");
+  }
+  
+  display.setTextColor(SSD1306_WHITE);
+  
+  // Time
+  display.setCursor(85, 2);
+  unsigned long seconds = millis() / 1000;
+  int mins = (seconds / 60) % 60;
+  int secs = seconds % 60;
+  display.print(mins);
+  display.print(":");
+  if (secs < 10) display.print("0");
+  display.print(secs);
+  
+  // Temperature - Big Display
+  display.setTextSize(2);
+  display.setCursor(2, 15);
+  display.print(temperature, 1);
+  
+  display.setTextSize(1);
+  display.setCursor(60, 19);
+  display.print(celsius ? "C" : "F");
+  
+  // Temperature Status
+  display.setCursor(75, 15);
+  display.setTextSize(1);
+  if (temperature > TEMP_LIMIT) {
+    display.print("[!HOT]");
+  } else if (temperature < 15.0) {
+    display.print("[COLD]");
+  } else if (temperature < 20.0) {
+    display.print("[COOL]");
+  } else if (temperature < 25.0) {
+    display.print("[WARM]");
+  } else {
+    display.print("[ OK ]");
+  }
+  
+  // Temperature Bar
+  display.drawRect(0, 27, 128, 4, SSD1306_WHITE);
+  int tempBar = map(constrain(temperature, 0, 50), 0, 50, 0, 124);
+  display.fillRect(2, 29, tempBar, 1, SSD1306_WHITE);
+  
+  // Humidity
+  display.setTextSize(2);
+  display.setCursor(2, 35);
+  display.print(humidity, 0);
+  
+  display.setTextSize(1);
+  display.setCursor(60, 39);
+  display.print("%");
+  
+  display.setCursor(75, 35);
+  display.setTextSize(1);
+  if (humidity > HUMIDITY_LIMIT) {
+    display.print("[!WET]");
+  } else if (humidity > 70.0) {
+    display.print("[WET]");
+  } else if (humidity < 30.0) {
+    display.print("[DRY]");
+  } else {
+    display.print("[ OK ]");
+  }
+  
+  display.drawRect(0, 47, 128, 4, SSD1306_WHITE);
+  int humidBar = map(constrain(humidity, 0, 100), 0, 100, 0, 124);
+  display.fillRect(2, 49, humidBar, 1, SSD1306_WHITE);
+  
+  // Status Bar
+  display.drawLine(0, 55, 127, 55, SSD1306_WHITE);
+  display.setTextSize(1);
+  
+  display.setCursor(2, 57);
+  display.print("P1");
+  
+  display.setCursor(20, 57);
+  display.print(alarmState ? "ALARM" : "NORM");
+  
+  display.setCursor(55, 57);
+  display.print("B:");
+  display.print(buzzerEnabled ? "ON" : "OFF");
+  
+  display.setCursor(80, 57);
+  display.print("A:");
+  display.print(autoPage ? "A" : "M");
+  
+  display.setCursor(105, 57);
+  if (animationFrame % 20 < 10) {
+    display.print("*");
+  } else {
+    display.print(" ");
+  }
+  
+  display.display();
+}
+
+// =====================================================
+// PAGE 2: GRAPH VIEW
+// =====================================================
+
+void showGraphPage() {
+  display.clearDisplay();
+  
+  display.setTextSize(1);
+  display.setCursor(2, 0);
+  display.print("SENSOR LEVELS");
+  display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+  
+  // Temperature Bar
+  display.setCursor(2, 13);
+  display.print("TEMP");
+  display.setCursor(45, 13);
+  display.print(temperature, 1);
+  display.print("C");
+  
+  display.drawRect(0, 23, 128, 14, SSD1306_WHITE);
+  int tempWidth = map(constrain(temperature, 0, 50), 0, 50, 0, 124);
+  display.fillRect(2, 25, tempWidth, 10, SSD1306_WHITE);
+  
+  int limitPos = map(TEMP_LIMIT, 0, 50, 0, 124);
+  display.drawLine(limitPos + 2, 22, limitPos + 2, 37, SSD1306_WHITE);
+  display.drawLine(limitPos + 1, 22, limitPos + 1, 37, SSD1306_WHITE);
+  
+  // Humidity Bar
+  display.setCursor(2, 40);
+  display.print("HUMID");
+  display.setCursor(45, 40);
+  display.print(humidity, 0);
+  display.print("%");
+  
+  display.drawRect(0, 50, 128, 12, SSD1306_WHITE);
+  int humidWidth = map(constrain(humidity, 0, 100), 0, 100, 0, 124);
+  display.fillRect(2, 52, humidWidth, 8, SSD1306_WHITE);
+  
+  int humidLimitPos = map(HUMIDITY_LIMIT, 0, 100, 0, 124);
+  display.drawLine(humidLimitPos + 2, 49, humidLimitPos + 2, 62, SSD1306_WHITE);
+  display.drawLine(humidLimitPos + 1, 49, humidLimitPos + 1, 62, SSD1306_WHITE);
+  
+  display.setTextSize(1);
+  display.setCursor(0, 61);
+  display.print("P2");
+  display.setCursor(110, 61);
+  display.print("<>");
+  
+  display.display();
+}
+
+// =====================================================
+// PAGE 3: STATISTICS
+// =====================================================
+
+void showStatisticsPage() {
+  display.clearDisplay();
+  
+  display.setTextSize(1);
+  display.setCursor(2, 0);
+  display.print("STATISTICS");
+  display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+  
+  // Temperature Stats
+  display.setCursor(2, 13);
+  display.print("TEMP");
+  display.drawRect(35, 11, 90, 20, SSD1306_WHITE);
+  
+  display.setCursor(38, 14);
+  display.print("MIN:");
+  display.print(minTemp, 1);
+  
+  display.setCursor(38, 22);
+  display.print("MAX:");
+  display.print(maxTemp, 1);
+  
+  display.setCursor(80, 14);
+  display.print("AVG:");
+  display.print(tempAverage, 1);
+  
+  // Humidity Stats
+  display.setCursor(2, 36);
+  display.print("HUMID");
+  display.drawRect(35, 34, 90, 20, SSD1306_WHITE);
+  
+  display.setCursor(38, 37);
+  display.print("MIN:");
+  display.print(minHumidity, 0);
+  
+  display.setCursor(38, 45);
+  display.print("MAX:");
+  display.print(maxHumidity, 0);
+  
+  display.setCursor(80, 37);
+  display.print("AVG:");
+  display.print(humidityAverage, 0);
+  
+  // Limits
+  display.setTextSize(1);
+  display.setCursor(0, 58);
+  display.print("LIM:");
+  display.print(TEMP_LIMIT, 0);
+  display.print("C/");
+  display.print(HUMIDITY_LIMIT, 0);
+  display.print("%");
+  
+  display.setCursor(90, 58);
+  display.print("P3");
+  
+  display.display();
+}
+
+// =====================================================
+// PAGE 4: HISTORY TREND
+// =====================================================
+
+void showHistoryPage() {
+  display.clearDisplay();
+  
+  display.setTextSize(1);
+  display.setCursor(2, 0);
+  display.print("HISTORY (6 MIN)");
+  display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+  
+  // Temperature Trend
+  display.setCursor(2, 14);
+  display.print("TMP");
+  
+  for (int i = 0; i < 98; i++) {
+    int idx1 = (historyIndex - (98 - i) + 180) % 180;
+    int idx2 = (historyIndex - (97 - i) + 180) % 180;
+    
+    int x1 = 23 + i;
+    int y1 = 33 - (tempHistory[idx1] / 3);
+    int x2 = 24 + i;
+    int y2 = 33 - (tempHistory[idx2] / 3);
+    
+    y1 = constrain(y1, 14, 33);
+    y2 = constrain(y2, 14, 33);
+    
+    display.drawLine(x1, y1, x2, y2, SSD1306_WHITE);
+  }
+  
+  // Humidity Trend
+  display.setCursor(2, 40);
+  display.print("HMD");
+  
+  for (int i = 0; i < 98; i++) {
+    int idx1 = (historyIndex - (98 - i) + 180) % 180;
+    int idx2 = (historyIndex - (97 - i) + 180) % 180;
+    
+    int x1 = 23 + i;
+    int y1 = 59 - (humidityHistory[idx1] / 5);
+    int x2 = 24 + i;
+    int y2 = 59 - (humidityHistory[idx2] / 5);
+    
+    y1 = constrain(y1, 40, 59);
+    y2 = constrain(y2, 40, 59);
+    
+    display.drawLine(x1, y1, x2, y2, SSD1306_WHITE);
+  }
+  
+  display.setTextSize(1);
+  display.setCursor(0, 61);
+  display.print("P4");
+  
+  display.display();
+}
+
+// =====================================================
+// PAGE 5: TREND ANALYSIS
+// =====================================================
+
+void showTrendPage() {
+  display.clearDisplay();
+  
+  display.setTextSize(1);
+  display.setCursor(2, 0);
+  display.print("TREND ANALYSIS");
+  display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+  
+  // Temperature Trend
+  display.setCursor(2, 14);
+  display.print("TEMP");
+  display.setCursor(40, 14);
+  display.print("TREND:");
+  
+  if (tempTrend > 0.5) {
+    display.print("RISING");
+  } else if (tempTrend < -0.5) {
+    display.print("FALLING");
+  } else {
+    display.print("STABLE");
+  }
+  
+  display.setCursor(95, 14);
+  if (tempTrend > 0.5) {
+    display.print("^");
+  } else if (tempTrend < -0.5) {
+    display.print("v");
+  } else {
+    display.print("-");
+  }
+  
+  // Humidity Trend
+  float humidTrend = 0;
+  if (historyIndex >= 10) {
+    float recent = 0, older = 0;
+    int rc = 0, oc = 0;
+    for (int i = 0; i < 10; i++) {
+      int idx = (historyIndex - 1 - i + 180) % 180;
+      if (humidityHistory[idx] > 0) { recent += humidityHistory[idx]; rc++; }
+    }
+    for (int i = 10; i < 20; i++) {
+      int idx = (historyIndex - 1 - i + 180) % 180;
+      if (humidityHistory[idx] > 0) { older += humidityHistory[idx]; oc++; }
+    }
+    if (rc > 0 && oc > 0) {
+      humidTrend = (recent / rc) - (older / oc);
+    }
+  }
+  
+  display.setCursor(2, 26);
+  display.print("HUMID");
+  display.setCursor(40, 26);
+  display.print("TREND:");
+  
+  if (humidTrend > 1) {
+    display.print("RISING");
+  } else if (humidTrend < -1) {
+    display.print("FALLING");
+  } else {
+    display.print("STABLE");
+  }
+  
+  display.setCursor(95, 26);
+  if (humidTrend > 1) {
+    display.print("^");
+  } else if (humidTrend < -1) {
+    display.print("v");
+  } else {
+    display.print("-");
+  }
+  
+  // Alarm Stats
+  display.setCursor(2, 40);
+  display.print("ALARM");
+  display.setCursor(40, 40);
+  display.print("COUNT:");
+  display.print(alarmCount);
+  
+  display.setCursor(2, 52);
+  display.print("DURATION:");
+  if (alarmState && alarmStartTime > 0) {
+    unsigned long duration = (millis() - alarmStartTime) / 1000;
+    display.print(duration);
+    display.print("s");
+  } else {
+    display.print("0s");
+  }
+  
+  display.setTextSize(1);
+  display.setCursor(0, 61);
+  display.print("P5");
+  
+  display.display();
+}
+
+// =====================================================
+// PAGE 6: SYSTEM INFO
+// =====================================================
+
+void showSystemPage() {
+  display.clearDisplay();
+  
+  display.setTextSize(1);
+  display.setCursor(2, 0);
+  display.print("SYSTEM INFO");
+  display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+  
+  display.setCursor(2, 14);
+  display.print("SENSOR");
+  display.setCursor(50, 14);
+  display.print(sensorConnected ? "OK" : "ERROR");
+  
+  display.setCursor(2, 24);
+  display.print("WIFI");
+  display.setCursor(50, 24);
+  display.print(WiFi.softAPIP());
+  
+  display.setCursor(2, 34);
+  display.print("MEMORY");
+  display.setCursor(50, 34);
+  display.print(ESP.getFreeHeap() / 1024);
+  display.print("KB");
+  
+  display.setCursor(2, 44);
+  display.print("UPTIME");
+  display.setCursor(50, 44);
+  
+  unsigned long uptime = millis() / 1000;
+  int hours = uptime / 3600;
+  int minutes = (uptime % 3600) / 60;
+  display.print(hours);
+  display.print("h ");
+  display.print(minutes);
+  display.print("m");
+  
+  display.setCursor(2, 54);
+  display.print("VERSION");
+  display.setCursor(50, 54);
+  display.print("v8.0");
+  
+  display.setTextSize(1);
+  display.setCursor(0, 61);
+  display.print("P6");
+  
+  display.display();
+}
+
+// =====================================================
+// PAGE 7: CLOCK / COMPASS
+// =====================================================
+
+void showClockPage() {
+  display.clearDisplay();
+  
+  display.setTextSize(1);
+  display.setCursor(2, 0);
+  display.print("LIVE METRICS");
+  display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+  
+  // Uptime
+  display.setCursor(2, 14);
+  display.print("UPTIME");
+  unsigned long uptime = millis() / 1000;
+  int hours = uptime / 3600;
+  int minutes = (uptime % 3600) / 60;
+  int seconds = uptime % 60;
+  display.setCursor(50, 14);
+  display.print(hours);
+  display.print(":");
+  if (minutes < 10) display.print("0");
+  display.print(minutes);
+  display.print(":");
+  if (seconds < 10) display.print("0");
+  display.print(seconds);
+  
+  // Readings
+  display.setCursor(2, 26);
+  display.print("TEMP");
+  display.setCursor(50, 26);
+  display.print(temperature, 1);
+  display.print(celsius ? "C" : "F");
+  
+  display.setCursor(2, 36);
+  display.print("HUMID");
+  display.setCursor(50, 36);
+  display.print(humidity, 0);
+  display.print("%");
+  
+  // Alarm Status
+  display.setCursor(2, 48);
+  display.print("ALARM");
+  display.setCursor(50, 48);
+  display.print(alarmState ? "ACTIVE" : "NORMAL");
+  
+  // Sensor Errors
+  display.setCursor(2, 58);
+  display.print("ERRORS");
+  display.setCursor(50, 58);
+  display.print(sensorErrors);
+  
+  display.display();
+}
+
+// =====================================================
+// ERROR SCREEN
+// =====================================================
+
+void showErrorScreen() {
+  display.clearDisplay();
+  
+  display.setTextSize(1);
+  display.setCursor(30, 5);
+  display.print("! ERROR !");
+  display.drawLine(0, 9, 127, 9, SSD1306_WHITE);
+  
+  display.setCursor(10, 20);
+  display.print("DHT11 NOT FOUND");
+  display.setCursor(20, 32);
+  display.print("CHECK WIRING");
+  
+  display.setCursor(15, 44);
+  if ((millis() / 500) % 2 == 0) {
+    display.print("RETRYING...");
+  } else {
+    display.print("            ");
+  }
+  
+  display.setCursor(10, 54);
+  display.print("ERRORS:");
+  display.print(sensorErrors);
+  
+  display.display();
+}
+
+// =====================================================
+// STARTUP SCREEN
+// =====================================================
+
+void showStartupScreen() {
+  display.clearDisplay();
+  
+  display.drawRect(0, 0, 128, 64, SSD1306_WHITE);
+  
+  display.setTextSize(2);
+  display.setCursor(25, 8);
+  display.print("ESP32");
+  
+  display.setTextSize(1);
+  display.setCursor(15, 28);
+  display.print("ENVIRONMENT");
+  display.setCursor(30, 38);
+  display.print("MONITOR");
+  
+  display.setCursor(10, 50);
+  display.print("IP:");
+  display.print(WiFi.softAPIP());
+  
+  for (int i = 0; i < 110; i += 2) {
+    display.drawRect(10, 59, 108, 4, SSD1306_WHITE);
+    display.fillRect(12, 61, i, 1, SSD1306_WHITE);
+    display.display();
+    delay(5);
+  }
+  
+  delay(300);
+}
+
+// =====================================================
+// ALARM SYSTEM
+// =====================================================
+
+void checkAlarm() {
+  bool tempAlarm = (temperature >= TEMP_LIMIT);
+  bool humidAlarm = (humidity >= HUMIDITY_LIMIT);
+  
+  if (tempAlarm || humidAlarm) {
+    alarmState = true;
+    
+    if (millis() - lastAlarmBlink >= 500) {
+      lastAlarmBlink = millis();
+      digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+    }
+    
+    if (buzzerEnabled && (millis() - lastMelodyPlay >= 10000) && !melodyPlaying) {
+      lastMelodyPlay = millis();
+      startAlarmMelody();
+    }
+    
+    if (alarmStartTime > 0) {
+      alarmTotalTime = millis() - alarmStartTime;
+    }
+    
+  } else {
+    if (alarmState) {
+      alarmState = false;
+      digitalWrite(LED_BUILTIN, LOW);
+      
+      if (melodyPlaying) {
+        melodyPlaying = false;
+        noTone(BUZZER_PIN);
+      }
+    }
+  }
+}
+
+// =====================================================
+// WEB SERVER
+// =====================================================
+
+void setupWebServer() {
+  server.on("/", handleRoot);
+  server.on("/data", handleData);
+  server.on("/settings", handleSettings);
+  server.on("/reset", handleReset);
+  server.on("/melody", handleMelody);
+  server.on("/alarm", handleAlarmReset);
+  server.on("/style.css", handleCSS);
+  server.on("/dashboard", handleDashboard);
+  server.begin();
+}
+
+void handleRoot() {
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta http-equiv='refresh' content='5'>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<link rel='stylesheet' href='/style.css'>";
+  html += "<title>ESP32 Environment Monitor</title>";
+  html += "</head><body>";
+  
+  html += "<div class='container'>";
+  html += "<div class='header'>";
+  html += "<h1>ESP32 ENV MONITOR</h1>";
+  html += "<div class='version'>v8.0</div>";
+  html += "</div>";
+  
+  // Temperature Card
+  html += "<div class='card'>";
+  html += "<div class='label'>Temperature</div>";
+  html += "<div class='value " + String(temperature > TEMP_LIMIT ? "danger" : "") + "'>";
+  html += String(temperature, 1) + "&deg;" + (celsius ? "C" : "F");
+  html += "</div>";
+  html += "<div class='bar-container'>";
+  int tempPercent = map(constrain(temperature, 0, 50), 0, 50, 0, 100);
+  html += "<div class='bar' style='width:" + String(tempPercent) + "%;background:" + String(temperature > TEMP_LIMIT ? "#ff6b6b" : "#4ecdc4") + "'></div>";
+  html += "</div>";
+  html += "</div>";
+  
+  // Humidity Card
+  html += "<div class='card'>";
+  html += "<div class='label'>Humidity</div>";
+  html += "<div class='value " + String(humidity > HUMIDITY_LIMIT ? "danger" : "") + "'>";
+  html += String(humidity, 0) + " %";
+  html += "</div>";
+  html += "<div class='bar-container'>";
+  int humidPercent = map(constrain(humidity, 0, 100), 0, 100, 0, 100);
+  html += "<div class='bar' style='width:" + String(humidPercent) + "%;background:" + String(humidity > HUMIDITY_LIMIT ? "#ff6b6b" : "#4ecdc4") + "'></div>";
+  html += "</div>";
+  html += "</div>";
+  
+  // Status Card
+  html += "<div class='card'>";
+  html += "<div class='label'>System Status</div>";
+  html += "<div class='value " + String(alarmState ? "danger" : "success") + "' style='font-size:24px'>";
+  html += alarmState ? "ALARM ACTIVE" : "NORMAL";
+  html += "</div>";
+  html += "<div class='info-grid'>";
+  html += "<span>Alarms: " + String(alarmCount) + "</span>";
+  html += "<span>Melody: " + String(melodyType + 1) + "</span>";
+  html += "<span>Buzzer: " + String(buzzerEnabled ? "ON" : "OFF") + "</span>";
+  html += "<span>Auto Page: " + String(autoPage ? "ON" : "OFF") + "</span>";
+  html += "</div>";
+  html += "</div>";
+  
+  // Stats
+  html += "<div class='card'>";
+  html += "<div class='label'>Statistics</div>";
+  html += "<div class='info-grid'>";
+  html += "<span>Min Temp: " + String(minTemp, 1) + "&deg;C</span>";
+  html += "<span>Max Temp: " + String(maxTemp, 1) + "&deg;C</span>";
+  html += "<span>Min Humid: " + String(minHumidity, 0) + "%</span>";
+  html += "<span>Max Humid: " + String(maxHumidity, 0) + "%</span>";
+  html += "<span>Avg Temp: " + String(tempAverage, 1) + "&deg;C</span>";
+  html += "<span>Avg Humid: " + String(humidityAverage, 0) + "%</span>";
+  html += "</div>";
+  html += "</div>";
+  
+  // Buttons
+  html += "<div class='buttons'>";
+  html += "<a href='/settings' class='btn'>Settings</a>";
+  html += "<a href='/melody' class='btn'>Melody</a>";
+  html += "<a href='/dashboard' class='btn'>Dashboard</a>";
+  html += "<a href='/reset' class='btn'>Reset</a>";
+  html += "<a href='/alarm' class='btn danger'>Clear Alarm</a>";
+  html += "</div>";
+  
+  html += "<div class='footer'>";
+  html += "Uptime: " + String(millis() / 1000 / 3600) + "h " + String((millis() / 1000 / 60) % 60) + "m";
+  html += " | Memory: " + String(ESP.getFreeHeap() / 1024) + "KB";
+  html += "</div>";
+  
+  html += "</div></body></html>";
+  server.send(200, "text/html", html);
+}
+
+void handleCSS() {
+  String css = "";
+  css += "*{margin:0;padding:0;box-sizing:border-box}";
+  css += "body{font-family:'Segoe UI',Arial,sans-serif;background:linear-gradient(135deg,#0a0a0a,#1a1a2e);color:#fff;padding:10px;min-height:100vh}";
+  css += ".container{max-width:500px;margin:0 auto}";
+  css += ".header{text-align:center;padding:15px 0;border-bottom:2px solid #333;margin-bottom:15px}";
+  css += ".header h1{color:#00d4ff;font-size:22px;font-weight:300;letter-spacing:2px}";
+  css += ".version{color:#666;font-size:11px;margin-top:5px}";
+  css += ".card{background:linear-gradient(145deg,#1a1a2e,#16213e);padding:18px;border-radius:15px;margin:12px 0;border:1px solid #2a2a4e}";
+  css += ".card:hover{border-color:#00d4ff}";
+  css += ".label{font-size:11px;color:#888;text-transform:uppercase;letter-spacing:2px;margin-bottom:5px}";
+  css += ".value{font-size:36px;font-weight:bold;margin:5px 0}";
+  css += ".danger{color:#ff6b6b}";
+  css += ".success{color:#4ecdc4}";
+  css += ".bar-container{width:100%;height:6px;background:#2a2a4e;border-radius:3px;margin-top:8px;overflow:hidden}";
+  css += ".bar{height:100%;border-radius:3px;transition:width 0.5s ease}";
+  css += ".info-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px;font-size:12px;color:#aaa}";
+  css += ".info-grid span{padding:4px 8px;background:#0a0a1a;border-radius:4px}";
+  css += ".buttons{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin:15px 0}";
+  css += ".btn{display:inline-block;padding:10px 18px;background:#1a1a2e;color:#00d4ff;text-decoration:none;border-radius:10px;border:1px solid #00d4ff;font-size:13px;transition:all 0.3s ease}";
+  css += ".btn:hover{background:#00d4ff;color:#0a0a0a;transform:translateY(-2px);box-shadow:0 5px 20px rgba(0,212,255,0.2)}";
+  css += ".btn.danger{border-color:#ff6b6b;color:#ff6b6b}";
+  css += ".btn.danger:hover{background:#ff6b6b;color:#0a0a0a;box-shadow:0 5px 20px rgba(255,107,107,0.2)}";
+  css += ".footer{text-align:center;font-size:11px;color:#444;margin-top:20px;padding:10px;border-top:1px solid #222}";
+  server.send(200, "text/css", css);
+}
+
+void handleDashboard() {
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta http-equiv='refresh' content='3'>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<style>";
+  html += "body{font-family:'Segoe UI',Arial,sans-serif;background:#0a0a0a;color:#fff;padding:10px;margin:0}";
+  html += ".grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;max-width:600px;margin:0 auto}";
+  html += ".item{background:#1a1a2e;padding:20px;border-radius:12px;text-align:center;border:1px solid #333}";
+  html += ".item .num{font-size:32px;font-weight:bold}";
+  html += ".item .lbl{font-size:11px;color:#888;text-transform:uppercase;letter-spacing:1px}";
+  html += ".red{color:#ff6b6b}";
+  html += ".cyan{color:#4ecdc4}";
+  html += ".green{color:#2ecc71}";
+  html += ".yellow{color:#f1c40f}";
+  html += ".full{grid-column:1/3}";
+  html += "h1{text-align:center;color:#00d4ff;font-weight:300;letter-spacing:2px}";
+  html += ".status{font-size:18px;font-weight:bold}";
+  html += "</style></head><body>";
+  
+  html += "<h1>DASHBOARD</h1>";
+  html += "<div class='grid'>";
+  
+  // Temperature
+  html += "<div class='item'>";
+  html += "<div class='lbl'>Temperature</div>";
+  html += "<div class='num " + String(temperature > TEMP_LIMIT ? "red" : "cyan") + "'>" + String(temperature, 1) + "&deg;C</div>";
+  html += "</div>";
+  
+  // Humidity
+  html += "<div class='item'>";
+  html += "<div class='lbl'>Humidity</div>";
+  html += "<div class='num " + String(humidity > HUMIDITY_LIMIT ? "red" : "cyan") + "'>" + String(humidity, 0) + "%</div>";
+  html += "</div>";
+  
+  // Min Temp
+  html += "<div class='item'>";
+  html += "<div class='lbl'>Min Temp</div>";
+  html += "<div class='num cyan'>" + String(minTemp, 1) + "&deg;C</div>";
+  html += "</div>";
+  
+  // Max Temp
+  html += "<div class='item'>";
+  html += "<div class='lbl'>Max Temp</div>";
+  html += "<div class='num red'>" + String(maxTemp, 1) + "&deg;C</div>";
+  html += "</div>";
+  
+  // Min Humidity
+  html += "<div class='item'>";
+  html += "<div class='lbl'>Min Humidity</div>";
+  html += "<div class='num cyan'>" + String(minHumidity, 0) + "%</div>";
+  html += "</div>";
+  
+  // Max Humidity
+  html += "<div class='item'>";
+  html += "<div class='lbl'>Max Humidity</div>";
+  html += "<div class='num red'>" + String(maxHumidity, 0) + "%</div>";
+  html += "</div>";
+  
+  // Status
+  html += "<div class='item full'>";
+  html += "<div class='lbl'>Status</div>";
+  html += "<div class='status " + String(alarmState ? "red" : "green") + "'>";
+  html += alarmState ? "ALARM ACTIVE" : "NORMAL";
+  html += "</div>";
+  html += "<div style='font-size:12px;color:#666;margin-top:5px'>";
+  html += "Alarms: " + String(alarmCount) + " | Errors: " + String(sensorErrors);
+  html += "</div>";
+  html += "</div>";
+  
+  html += "</div>";
+  html += "<div style='text-align:center;margin-top:15px'><a href='/' style='color:#00d4ff;text-decoration:none'>← Back</a></div>";
+  html += "</body></html>";
+  server.send(200, "text/html", html);
+}
+
+void handleData() {
+  String json = "{";
+  json += "\"temperature\":" + String(temperature, 1) + ",";
+  json += "\"humidity\":" + String(humidity, 0) + ",";
+  json += "\"minTemp\":" + String(minTemp, 1) + ",";
+  json += "\"maxTemp\":" + String(maxTemp, 1) + ",";
+  json += "\"minHumidity\":" + String(minHumidity, 0) + ",";
+  json += "\"maxHumidity\":" + String(maxHumidity, 0) + ",";
+  json += "\"tempAverage\":" + String(tempAverage, 1) + ",";
+  json += "\"humidityAverage\":" + String(humidityAverage, 0) + ",";
+  json += "\"alarm\":" + String(alarmState ? "true" : "false") + ",";
+  json += "\"alarmCount\":" + String(alarmCount) + ",";
+  json += "\"buzzer\":" + String(buzzerEnabled ? "true" : "false") + ",";
+  json += "\"melody\":" + String(melodyType) + ",";
+  json += "\"autoPage\":" + String(autoPage ? "true" : "false") + ",";
+  json += "\"sensorErrors\":" + String(sensorErrors) + ",";
+  json += "\"uptime\":" + String(millis() / 1000) + ",";
+  json += "\"freeHeap\":" + String(ESP.getFreeHeap());
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
+void handleSettings() {
+  if (server.hasArg("temp")) {
+    TEMP_LIMIT = server.arg("temp").toFloat();
+    HUMIDITY_LIMIT = server.arg("humid").toFloat();
+    buzzerEnabled = server.arg("buzzer").toInt();
+    autoPage = server.arg("autopage").toInt();
+    settings.buzzerEnabled = buzzerEnabled;
+    settings.autoPage = autoPage;
+    saveSettings();
+    server.send(200, "text/plain", "Settings Saved!");
+    return;
+  }
+  
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<style>body{font-family:'Segoe UI',Arial,sans-serif;background:#0a0a0a;color:#fff;padding:20px;max-width:400px;margin:0 auto}";
+  html += "h1{color:#00d4ff;font-weight:300;letter-spacing:2px}";
+  html += "input,select{padding:10px;margin:10px;background:#1a1a2e;color:#fff;border:1px solid #00d4ff;border-radius:8px;width:100px}";
+  html += ".btn{background:#00d4ff;color:#0a0a0a;padding:12px 30px;border:none;border-radius:8px;font-weight:bold;cursor:pointer}";
+  html += "label{display:inline-block;width:120px;color:#aaa}";
+  html += ".field{margin:10px 0}</style></head><body>";
+  
+  html += "<h1>Settings</h1>";
+  html += "<form method='POST'>";
+  html += "<div class='field'><label>Temp Limit:</label><input type='number' step='0.5' name='temp' value='" + String(TEMP_LIMIT) + "'></div>";
+  html += "<div class='field'><label>Humidity Limit:</label><input type='number' step='1' name='humid' value='" + String(HUMIDITY_LIMIT) + "'></div>";
+  html += "<div class='field'><label>Buzzer:</label><select name='buzzer'>";
+  html += "<option value='1'" + String(buzzerEnabled ? " selected" : "") + ">ON</option>";
+  html += "<option value='0'" + String(!buzzerEnabled ? " selected" : "") + ">OFF</option>";
+  html += "</select></div>";
+  html += "<div class='field'><label>Auto Page:</label><select name='autopage'>";
+  html += "<option value='1'" + String(autoPage ? " selected" : "") + ">ON</option>";
+  html += "<option value='0'" + String(!autoPage ? " selected" : "") + ">OFF</option>";
+  html += "</select></div>";
+  html += "<input type='submit' value='SAVE' class='btn'>";
+  html += "</form>";
+  html += "<br><a href='/' style='color:#00d4ff'>← Back</a>";
+  html += "</body></html>";
+  server.send(200, "text/html", html);
+}
+
+void handleMelody() {
+  if (server.hasArg("melody")) {
+    melodyType = server.arg("melody").toInt();
+    settings.melodyType = melodyType;
+    selectMelody(melodyType);
+    saveSettings();
+    
+    if (buzzerEnabled) {
+      playFullMelody(currentMelody, currentDuration, currentMelodyLen);
+    }
+    
+    server.send(200, "text/plain", "Melody Selected!");
+    return;
+  }
+  
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<style>body{font-family:'Segoe UI',Arial,sans-serif;background:#0a0a0a;color:#fff;padding:20px;max-width:400px;margin:0 auto}";
+  html += "h1{color:#00d4ff;font-weight:300;letter-spacing:2px}";
+  html += "select{padding:10px;margin:10px;background:#1a1a2e;color:#fff;border:1px solid #00d4ff;border-radius:8px;width:200px}";
+  html += ".btn{background:#00d4ff;color:#0a0a0a;padding:12px 30px;border:none;border-radius:8px;font-weight:bold;cursor:pointer}</style></head><body>";
+  
+  html += "<h1>Select Melody</h1>";
+  html += "<form method='POST'>";
+  html += "<select name='melody'>";
+  html += "<option value='0'" + String(melodyType == 0 ? " selected" : "") + ">Wind Chime</option>";
+  html += "<option value='1'" + String(melodyType == 1 ? " selected" : "") + ">Morning Birds</option>";
+  html += "<option value='2'" + String(melodyType == 2 ? " selected" : "") + ">Twilight</option>";
+  html += "<option value='3'" + String(melodyType == 3 ? " selected" : "") + ">Crystal Bells</option>";
+  html += "<option value='4'" + String(melodyType == 4 ? " selected" : "") + ">Raindrops</option>";
+  html += "<option value='5'" + String(melodyType == 5 ? " selected" : "") + ">Ocean Waves</option>";
+  html += "<option value='6'" + String(melodyType == 6 ? " selected" : "") + ">Forest</option>";
+  html += "</select><br>";
+  html += "<input type='submit' value='SELECT' class='btn'>";
+  html += "</form>";
+  html += "<br><a href='/' style='color:#00d4ff'>← Back</a>";
+  html += "</body></html>";
+  server.send(200, "text/html", html);
+}
+
+void handleAlarmReset() {
+  alarmCount = 0;
+  alarmState = false;
+  alarmTotalTime = 0;
+  digitalWrite(LED_BUILTIN, LOW);
+  if (melodyPlaying) {
+    melodyPlaying = false;
+    noTone(BUZZER_PIN);
+  }
+  server.send(200, "text/plain", "Alarm Cleared!");
+}
+
+void handleReset() {
+  resetStatistics();
+  server.send(200, "text/plain", "Statistics Reset!");
+}
+
+// =====================================================
+// EEPROM FUNCTIONS
+// =====================================================
+
+void loadSettings() {
+  EEPROM.get(0, settings);
+  
+  if (settings.tempLimit > 0) {
+    TEMP_LIMIT = settings.tempLimit;
+    HUMIDITY_LIMIT = settings.humidityLimit;
+    buzzerEnabled = settings.buzzerEnabled;
+    melodyType = settings.melodyType;
+    autoPage = settings.autoPage;
+    Serial.println("[EEPROM] Settings loaded");
+  } else {
+    settings.tempLimit = 30.0;
+    settings.humidityLimit = 80.0;
+    settings.buzzerEnabled = true;
+    settings.melodyType = 0;
+    settings.pageInterval = 6000;
+    settings.celsius = true;
+    settings.autoPage = true;
+    settings.darkMode = true;
+    settings.brightness = 100;
+    settings.showSeconds = true;
+    saveSettings();
+    Serial.println("[EEPROM] Default settings saved");
+  }
+}
+
+void saveSettings() {
+  settings.tempLimit = TEMP_LIMIT;
+  settings.humidityLimit = HUMIDITY_LIMIT;
+  settings.buzzerEnabled = buzzerEnabled;
+  settings.melodyType = melodyType;
+  settings.autoPage = autoPage;
+  EEPROM.put(0, settings);
+  EEPROM.commit();
+  Serial.println("[EEPROM] Settings saved");
+}
+
+// =====================================================
+// RESET STATISTICS
+// =====================================================
+
+void resetStatistics() {
+  minTemp = temperature;
+  maxTemp = temperature;
+  minHumidity = humidity;
+  maxHumidity = humidity;
+  alarmCount = 0;
+  alarmState = false;
+  alarmTotalTime = 0;
+  digitalWrite(LED_BUILTIN, LOW);
+  if (melodyPlaying) {
+    melodyPlaying = false;
+    noTone(BUZZER_PIN);
+  }
+  Serial.println("[STATS] Statistics Reset");
+}
+
+// =====================================================
+// SERIAL OUTPUT
+// =====================================================
+
+void printSerialData() {
+  Serial.println("═══════════════════════════════════════");
+  Serial.print("TEMP: ");
+  Serial.print(temperature, 1);
+  Serial.println(" C");
+  
+  Serial.print("HUMID: ");
+  Serial.print(humidity, 0);
+  Serial.println(" %");
+  
+  Serial.print("ALARM: ");
+  Serial.println(alarmState ? "ACTIVE" : "NORMAL");
+  
+  if (alarmState) {
+    Serial.print("  COUNT: ");
+    Serial.println(alarmCount);
+  }
+  
+  Serial.print("BUZZER: ");
+  Serial.println(buzzerEnabled ? "ON" : "OFF");
+  
+  Serial.print("MELODY: ");
+  Serial.println(melodyType + 1);
+  
+  Serial.print("PAGE: ");
+  Serial.println(currentPage + 1);
+  
+  Serial.print("WEB: ");
+  Serial.println(WiFi.softAPIP());
+  Serial.println("═══════════════════════════════════════");
+}
